@@ -2,26 +2,26 @@ import os
 import httpx
 import tempfile
 from fastapi import FastAPI, Request
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 app = FastAPI()
 
 async def send_message(chat_id: int, text: str):
-    async with httpx.AsyncClient() as client:
-        await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
+    async with httpx.AsyncClient() as http:
+        await http.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 async def download_file(file_id: str) -> bytes:
-    async with httpx.AsyncClient() as client:
-        r = await client.get(f"{TELEGRAM_API}/getFile?file_id={file_id}")
+    async with httpx.AsyncClient() as http:
+        r = await http.get(f"{TELEGRAM_API}/getFile?file_id={file_id}")
         file_path = r.json()["result"]["file_path"]
-        r2 = await client.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
+        r2 = await http.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}")
         return r2.content
 
 @app.post("/webhook")
@@ -39,17 +39,21 @@ async def webhook(request: Request):
             with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
                 f.write(audio_bytes)
                 tmp_path = f.name
-            uploaded = genai.upload_file(tmp_path, mime_type="audio/ogg")
-            response = model.generate_content([
-                "Sei un assistente personale utile e conciso. L'utente ti ha mandato un messaggio vocale. Ascoltalo e rispondi in italiano.",
-                uploaded
-            ])
+            with open(tmp_path, "rb") as af:
+                audio_data = af.read()
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=[
+                    types.Part.from_bytes(data=audio_data, mime_type="audio/ogg"),
+                    "Sei un assistente personale utile e conciso. Ascolta il messaggio vocale e rispondi in italiano."
+                ]
+            )
             await send_message(chat_id, response.text)
         elif "text" in message:
-            response = model.generate_content([
-                "Sei un assistente personale utile e conciso. Rispondi in italiano.",
-                message["text"]
-            ])
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=f"Sei un assistente personale utile e conciso. Rispondi in italiano. Messaggio: {message['text']}"
+            )
             await send_message(chat_id, response.text)
     except Exception as e:
         await send_message(chat_id, f"Errore: {str(e)}")
